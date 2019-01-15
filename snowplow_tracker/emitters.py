@@ -31,7 +31,6 @@ except ImportError:
     from queue import Queue
 
 from celery import Celery
-from celery.task import task
 import redis
 import requests
 from contracts import contract, new_contract
@@ -51,6 +50,17 @@ new_contract("method", lambda x: x == "get" or x == "post")
 new_contract("function", lambda x: hasattr(x, "__call__"))
 
 new_contract("redis", lambda x: isinstance(x, (redis.Redis, redis.StrictRedis)))
+
+
+try:
+    # Check whether a custom Celery configuration module named "snowplow_celery_config" exists
+    import snowplow_celery_config
+    app = Celery()
+    app.config_from_object(snowplow_celery_config)
+except ImportError:
+    # Otherwise configure Celery with default settings
+    snowplow_celery_config = None
+    app = Celery("Snowplow", broker="redis://guest@localhost//")
 
 
 class Emitter(object):
@@ -376,6 +386,14 @@ class AsyncEmitter(Emitter):
             self.queue.task_done()
 
 
+@app.task(bind=True, name='tasks.flush')  # the self passed with bind can be used for on_fail/retrying
+def flush_emitter(self, emitter):
+    try:
+        emitter.flush()
+    finally:
+        logger.info("Flush called on emitter")
+
+
 class CeleryEmitter(Emitter):
     """
         Uses a Celery worker to send HTTP requests asynchronously.
@@ -402,7 +420,7 @@ class CeleryEmitter(Emitter):
         """
             Schedules a flush task
         """
-        self.async_flush.delay()
+        flush_emitter.delay(self)  # passes emitter (self - CeleryEmitter) to task
         logger.info("Scheduled a Celery task to flush the event queue")
 
     def async_flush(self):
